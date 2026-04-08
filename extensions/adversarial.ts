@@ -16,8 +16,15 @@
  * of turns followed by a synthesis.
  */
 
-import type { AssistantMessage, Message, Model, TextContent, UserMessage } from "@mariozechner/pi-ai";
-import { stream } from "@mariozechner/pi-ai";
+import type {
+	AssistantMessage,
+	Message,
+	Model,
+	TextContent,
+	ThinkingLevel,
+	UserMessage,
+} from "@mariozechner/pi-ai";
+import { streamSimple } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Box, Markdown, Text } from "@mariozechner/pi-tui";
@@ -29,6 +36,26 @@ import { Box, Markdown, Text } from "@mariozechner/pi-tui";
 type ConvergenceMode = "auto" | "manual" | "strict";
 type SynthesisStyle = "merged" | "annotated" | "diff";
 
+/**
+ * Thinking-level choice per role. Extends pi-ai's ThinkingLevel with "off"
+ * so users can explicitly opt out of reasoning even on reasoning-capable
+ * models (e.g. for speed).
+ */
+type ThinkingChoice = "off" | ThinkingLevel;
+
+const THINKING_CHOICES: readonly ThinkingChoice[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+] as const;
+
+function isThinkingChoice(value: string): value is ThinkingChoice {
+	return (THINKING_CHOICES as readonly string[]).includes(value);
+}
+
 interface ModelRef {
 	provider: string;
 	id: string;
@@ -37,6 +64,8 @@ interface ModelRef {
 interface AdversarialConfig {
 	advocate: ModelRef;
 	adversary: ModelRef;
+	advocate_thinking: ThinkingChoice;
+	adversary_thinking: ThinkingChoice;
 	min_turns: number;
 	max_turns: number;
 	convergence_mode: ConvergenceMode;
@@ -46,10 +75,34 @@ interface AdversarialConfig {
 /**
  * Shape persisted via pi.appendEntry(STATE_ENTRY_TYPE, ...).
  * The most recent entry on the current branch wins on restore.
+ *
+ * Note: `config` is deserialized from disk and may be missing fields added
+ * in later versions of the extension. Use `normalizeRestoredConfig()` before
+ * treating it as a full AdversarialConfig.
  */
 interface PersistedState {
 	enabled: boolean;
-	config: AdversarialConfig | null;
+	config: Partial<AdversarialConfig> | null;
+}
+
+/**
+ * Backfill optional fields on a persisted config so older session files
+ * (pre-thinking-level support) still restore cleanly.
+ */
+function normalizeRestoredConfig(
+	raw: Partial<AdversarialConfig> | null | undefined,
+): AdversarialConfig | null {
+	if (!raw || !raw.advocate || !raw.adversary) return null;
+	return {
+		advocate: raw.advocate,
+		adversary: raw.adversary,
+		advocate_thinking: raw.advocate_thinking ?? DEFAULTS.advocate_thinking,
+		adversary_thinking: raw.adversary_thinking ?? DEFAULTS.adversary_thinking,
+		min_turns: raw.min_turns ?? DEFAULTS.min_turns,
+		max_turns: raw.max_turns ?? DEFAULTS.max_turns,
+		convergence_mode: raw.convergence_mode ?? DEFAULTS.convergence_mode,
+		synthesis_style: raw.synthesis_style ?? DEFAULTS.synthesis_style,
+	};
 }
 
 const DEFAULTS = {
@@ -57,6 +110,8 @@ const DEFAULTS = {
 	max_turns: 10,
 	convergence_mode: "auto" as ConvergenceMode,
 	synthesis_style: "merged" as SynthesisStyle,
+	advocate_thinking: "off" as ThinkingChoice,
+	adversary_thinking: "off" as ThinkingChoice,
 };
 
 const CUSTOM_TYPE = "adversarial";
@@ -160,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 			const data = entry.data as PersistedState | undefined;
 			if (!data) return;
 			enabled = data.enabled;
-			config = data.config;
+			config = normalizeRestoredConfig(data.config);
 			if (enabled && config) {
 				ctx.ui.setStatus(
 					"adversarial",
@@ -459,11 +514,17 @@ const HELP_TEXT = [
 	"- `max=<n>` — Max round-trips hard cap (default 10)",
 	"- `convergence=<auto|manual|strict>` — Convergence mode (default auto)",
 	"- `synthesis=<merged|annotated|diff>` — Synthesis style (default merged)",
+	"- `advocate_thinking=<off|minimal|low|medium|high|xhigh>` — Advocate",
+	"  reasoning level (default off). Automatically clamped to `off` on",
+	"  non-reasoning models.",
+	"- `adversary_thinking=<off|minimal|low|medium|high|xhigh>` — Adversary",
+	"  reasoning level (default off). Same clamping.",
 	"",
 	"**Example**",
 	"",
 	"```",
-	"/adversarial on anthropic/claude-haiku-4-5 anthropic/claude-sonnet-4-5 min=2 max=3",
+	"/adversarial on anthropic/claude-haiku-4-5 anthropic/claude-opus-4-5 \\",
+	"    min=2 max=4 advocate_thinking=low adversary_thinking=high",
 	"```",
 	"",
 	"**Streaming**",
@@ -482,8 +543,8 @@ const HELP_TEXT = [
 
 function formatConfigSummary(cfg: AdversarialConfig): string {
 	return [
-		`- **Advocate:** \`${cfg.advocate.provider}/${cfg.advocate.id}\``,
-		`- **Adversary:** \`${cfg.adversary.provider}/${cfg.adversary.id}\``,
+		`- **Advocate:** \`${cfg.advocate.provider}/${cfg.advocate.id}\` · thinking \`${cfg.advocate_thinking}\``,
+		`- **Adversary:** \`${cfg.adversary.provider}/${cfg.adversary.id}\` · thinking \`${cfg.adversary_thinking}\``,
 		`- **Min turns:** ${cfg.min_turns}`,
 		`- **Max turns:** ${cfg.max_turns}`,
 		`- **Convergence:** \`${cfg.convergence_mode}\``,
@@ -534,13 +595,15 @@ function parseInlineConfig(tokens: string[], ctx: ExtensionContext): Adversarial
 	let max_turns = DEFAULTS.max_turns;
 	let convergence_mode: ConvergenceMode = DEFAULTS.convergence_mode;
 	let synthesis_style: SynthesisStyle = DEFAULTS.synthesis_style;
+	let advocate_thinking: ThinkingChoice = DEFAULTS.advocate_thinking;
+	let adversary_thinking: ThinkingChoice = DEFAULTS.adversary_thinking;
 
 	for (const token of tokens.slice(2)) {
 		const eq = token.indexOf("=");
 		if (eq < 0) {
 			throw new Error(`Unknown positional arg '${token}' (expected key=value)`);
 		}
-		const key = token.slice(0, eq).trim().toLowerCase();
+		const key = token.slice(0, eq).trim().toLowerCase().replace(/-/g, "_");
 		const value = token.slice(eq + 1).trim();
 
 		switch (key) {
@@ -566,14 +629,41 @@ function parseInlineConfig(tokens: string[], ctx: ExtensionContext): Adversarial
 				}
 				synthesis_style = value;
 				break;
+			case "advocate_thinking":
+			case "at":
+				if (!isThinkingChoice(value)) {
+					throw new Error(
+						`Invalid advocate_thinking '${value}' (want ${THINKING_CHOICES.join("|")})`,
+					);
+				}
+				advocate_thinking = value;
+				break;
+			case "adversary_thinking":
+			case "adt":
+				if (!isThinkingChoice(value)) {
+					throw new Error(
+						`Invalid adversary_thinking '${value}' (want ${THINKING_CHOICES.join("|")})`,
+					);
+				}
+				adversary_thinking = value;
+				break;
 			default:
 				throw new Error(`Unknown parameter '${key}'`);
 		}
 	}
 
+	// If the picked model doesn't support reasoning, silently coerce its
+	// thinking level to "off" so the persisted config matches reality. The
+	// Debater will also clamp at runtime, but doing it here keeps the
+	// status bar and `/adversarial status` output honest.
+	if (!advocateModel.reasoning) advocate_thinking = "off";
+	if (!adversaryModel.reasoning) adversary_thinking = "off";
+
 	return {
 		advocate,
 		adversary,
+		advocate_thinking,
+		adversary_thinking,
 		min_turns,
 		max_turns: Math.max(max_turns, min_turns),
 		convergence_mode,
@@ -603,6 +693,27 @@ async function runSetupFlow(ctx: ExtensionContext): Promise<AdversarialConfig | 
 	if (!adversaryPick) return null;
 	const adversaryModel = available[modelLabels.indexOf(adversaryPick)];
 	if (!adversaryModel) return null;
+
+	// Thinking levels — only prompt if the model actually supports reasoning.
+	let advocate_thinking: ThinkingChoice = "off";
+	if (advocateModel.reasoning) {
+		const pick = (await ctx.ui.select(
+			`Advocate thinking level (${advocateModel.id} supports reasoning):`,
+			[...THINKING_CHOICES],
+		)) as ThinkingChoice | undefined;
+		if (!pick) return null;
+		advocate_thinking = pick;
+	}
+
+	let adversary_thinking: ThinkingChoice = "off";
+	if (adversaryModel.reasoning) {
+		const pick = (await ctx.ui.select(
+			`Adversary thinking level (${adversaryModel.id} supports reasoning):`,
+			[...THINKING_CHOICES],
+		)) as ThinkingChoice | undefined;
+		if (!pick) return null;
+		adversary_thinking = pick;
+	}
 
 	const minInput = await ctx.ui.input(
 		`min_turns (default ${DEFAULTS.min_turns}):`,
@@ -636,6 +747,8 @@ async function runSetupFlow(ctx: ExtensionContext): Promise<AdversarialConfig | 
 	return {
 		advocate: { provider: advocateModel.provider, id: advocateModel.id },
 		adversary: { provider: adversaryModel.provider, id: adversaryModel.id },
+		advocate_thinking,
+		adversary_thinking,
 		min_turns,
 		max_turns: Math.max(max_turns, min_turns),
 		convergence_mode: convergencePick,
@@ -675,13 +788,22 @@ class Debater {
 	private readonly history: Message[] = [];
 	private _lastText = "";
 	private _firstText = "";
+	/** Effective thinking level after clamping against model capabilities. */
+	readonly effectiveThinking: ThinkingChoice;
 
 	constructor(
 		readonly role: "advocate" | "adversary",
 		readonly model: Model<any>,
 		private readonly systemPrompt: string,
 		private readonly auth: { apiKey?: string; headers?: Record<string, string> },
-	) {}
+		requestedThinking: ThinkingChoice = "off",
+	) {
+		// Clamp: non-reasoning models always run with thinking off, regardless
+		// of what the user asked for. This mirrors pi's built-in setThinkingLevel
+		// clamping behavior and prevents sending `reasoning: "high"` to a model
+		// that would error out on it.
+		this.effectiveThinking = model.reasoning ? requestedThinking : "off";
+	}
 
 	get turnsCompleted(): number {
 		return this.history.filter((m) => m.role === "assistant").length;
@@ -718,7 +840,7 @@ class Debater {
 		// Optional debug hook: if ADVERSARIAL_DEBUG_PAYLOADS is set to a file
 		// path, every outgoing provider payload is captured there with a role
 		// tag. Used to verify context isolation between the two Debater
-		// instances (see /tmp/adv-test/payload-isolation.test.sh).
+		// instances.
 		const debugPayloadFile = process.env.ADVERSARIAL_DEBUG_PAYLOADS;
 		const onPayload = debugPayloadFile
 			? (payload: unknown) => {
@@ -726,7 +848,11 @@ class Debater {
 						const { appendFileSync } = require("node:fs");
 						appendFileSync(
 							debugPayloadFile,
-							`${JSON.stringify({ role: this.role, payload })}\n`,
+							`${JSON.stringify({
+								role: this.role,
+								thinking: this.effectiveThinking,
+								payload,
+							})}\n`,
 						);
 					} catch {
 						// Best-effort; never break the debate on logging failure.
@@ -735,7 +861,10 @@ class Debater {
 				}
 			: undefined;
 
-		const eventStream = stream(
+		// Use streamSimple so we can pass `reasoning` as a typed option. When
+		// thinking is "off" we leave the reasoning field unset, which tells
+		// the provider to use its default (no reasoning).
+		const eventStream = streamSimple(
 			this.model,
 			{ systemPrompt: this.systemPrompt, messages: this.history },
 			{
@@ -743,6 +872,9 @@ class Debater {
 				headers: this.auth.headers,
 				signal,
 				onPayload,
+				...(this.effectiveThinking !== "off"
+					? { reasoning: this.effectiveThinking }
+					: {}),
 			},
 		);
 
@@ -820,14 +952,20 @@ async function runDebate(
 	const adversaryAuth = await ctx.modelRegistry.getApiKeyAndHeaders(adversaryModel);
 	if (!adversaryAuth.ok) throw new Error(`Adversary auth failed: ${adversaryAuth.error}`);
 
-	const advocate = new Debater("advocate", advocateModel, ADVOCATE_PROMPT, {
-		apiKey: advocateAuth.apiKey,
-		headers: advocateAuth.headers,
-	});
-	const adversary = new Debater("adversary", adversaryModel, ADVERSARY_PROMPT, {
-		apiKey: adversaryAuth.apiKey,
-		headers: adversaryAuth.headers,
-	});
+	const advocate = new Debater(
+		"advocate",
+		advocateModel,
+		ADVOCATE_PROMPT,
+		{ apiKey: advocateAuth.apiKey, headers: advocateAuth.headers },
+		cfg.advocate_thinking,
+	);
+	const adversary = new Debater(
+		"adversary",
+		adversaryModel,
+		ADVERSARY_PROMPT,
+		{ apiKey: adversaryAuth.apiKey, headers: adversaryAuth.headers },
+		cfg.adversary_thinking,
+	);
 
 	// Render the user's original prompt in the transcript (as a custom message,
 	// not an orchestrator-session user message — the orchestrator session stays

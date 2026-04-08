@@ -1,6 +1,6 @@
 {
   "name": "pi-adversary",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Structured advocate/adversary debate chat mode for the pi coding agent.",
   "keywords": [
     "pi-package",

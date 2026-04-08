@@ -56,6 +56,10 @@ on the bigger model.
 - **Three synthesis styles.** `merged` (clean final answer),
   `annotated` (final answer + listed critiques), `diff` (initial
   vs final side-by-side).
+- **Per-role reasoning level.** Run a fast advocate at
+  `thinking=off` against an adversary at `thinking=high` to buy a
+  rigorous second opinion without paying for two slow turns.
+  Automatically clamps to `off` on non-reasoning models.
 - **Configurable via CLI args or interactive setup.**
 - **Cancellable.** Any second user message mid-debate aborts the
   in-flight debate.
@@ -171,12 +175,14 @@ configured (`pi login` or env vars).
 
 ### Parameters
 
-| Key           | Default   | Values                         | Description                                                                           |
-| ------------- | --------- | ------------------------------ | ------------------------------------------------------------------------------------- |
-| `min`         | `3`       | 1–50                           | Minimum round-trips (advocate → adversary) before convergence is allowed.             |
-| `max`         | `10`      | 1–50                           | Hard cap on round-trips. Forces synthesis on the advocate's `max`-th turn.            |
-| `convergence` | `auto`    | `auto` \| `manual` \| `strict` | How the loop decides to stop.                                                         |
-| `synthesis`   | `merged`  | `merged` \| `annotated` \| `diff` | Final output format.                                                               |
+| Key                  | Default  | Values                                                | Description                                                                                                                            |
+| -------------------- | -------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `min`                | `3`      | 1–50                                                  | Minimum round-trips (advocate → adversary) before convergence is allowed.                                                              |
+| `max`                | `10`     | 1–50                                                  | Hard cap on round-trips. Forces synthesis on the advocate's `max`-th turn.                                                             |
+| `convergence`        | `auto`   | `auto` \| `manual` \| `strict`                        | How the loop decides to stop.                                                                                                          |
+| `synthesis`          | `merged` | `merged` \| `annotated` \| `diff`                     | Final output format.                                                                                                                   |
+| `advocate_thinking`  | `off`    | `off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | Reasoning level for the advocate role. Silently clamped to `off` on non-reasoning models. Aliases: `at`, `advocate-thinking`. |
+| `adversary_thinking` | `off`    | `off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | Reasoning level for the adversary role. Same clamping. Aliases: `adt`, `adversary-thinking`.                                  |
 
 #### Convergence modes
 
@@ -209,7 +215,28 @@ configured (`pi login` or env vars).
 
 # Cross-provider debate with diff output
 /adversarial on anthropic/claude-opus-4-5 google/gemini-2.5-pro synthesis=diff
+
+# Cheap advocate, deep-thinking adversary — the best of both worlds
+/adversarial on anthropic/claude-haiku-4-5 anthropic/claude-opus-4-5 \
+    min=2 max=4 advocate_thinking=off adversary_thinking=high
 ```
+
+#### Per-role reasoning levels
+
+The `*_thinking` params map to pi-ai's `reasoning` option, which the
+provider then translates into its native reasoning config:
+
+- **Anthropic** — `thinking: { type: "enabled", budget_tokens: N }` with
+  the budget growing with the level (`low` → 2048, `medium` → 8192,
+  `high` → 16384, `xhigh` → 32768 on Opus 4.6).
+- **OpenAI** — `reasoning_effort: "low" | "medium" | "high"`.
+- **Google** — thinking budget for Gemini 2.5 reasoning models.
+
+If you pick a non-reasoning model, the field is silently clamped to
+`off` and the persisted config reflects that, so `/adversarial status`
+is always honest about what's actually being sent. The interactive
+setup flow only prompts for thinking levels on models where
+`model.reasoning === true`.
 
 ## Context Isolation
 
@@ -375,9 +402,11 @@ ADVERSARIAL_DEBUG_PAYLOADS=/tmp/payloads.jsonl pi --mode rpc --no-tools < test-d
 - **Persistence lazy-flush caveat** — see above. A brand-new session
   that never leaves adversarial mode will not write to disk until
   you exit the mode or do a normal chat turn.
-- **No reasoning level passthrough.** The advocate and adversary
-  always use default thinking settings. Setting thinking level per
-  role is an obvious future extension.
+- **No custom thinking budgets.** You can pick a reasoning level per
+  role, but the actual token budget per level is whatever the
+  provider's default is. Per-level budget tuning via
+  `SimpleStreamOptions.thinkingBudgets` is plumbed in pi-ai but not
+  exposed by this extension yet.
 
 ## Requirements
 
