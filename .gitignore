@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+package-lock.json
+bun.lockb
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local pi state / tests
+.pi/
+/tmp/

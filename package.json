@@ -1,0 +1,35 @@
+{
+  "name": "pi-adversary",
+  "version": "0.1.0",
+  "description": "Structured advocate/adversary debate chat mode for the pi coding agent.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "llm",
+    "debate",
+    "multi-agent",
+    "adversarial"
+  ],
+  "license": "MIT",
+  "author": "Nayeem Zen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nayeemzen/pi-adversary.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nayeemzen/pi-adversary/issues"
+  },
+  "homepage": "https://github.com/nayeemzen/pi-adversary#readme",
+  "type": "module",
+  "private": false,
+  "pi": {
+    "extensions": [
+      "./extensions/adversarial.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  }
+}
