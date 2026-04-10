@@ -118,6 +118,27 @@ const CUSTOM_TYPE = "adversarial";
 const STATE_ENTRY_TYPE = "adversarial-state";
 const WIDGET_KEY = "adversarial-stream";
 
+/**
+ * A single recorded turn in the debate transcript. Stored in the debate
+ * message's `details.turns` array and used by the renderer for the
+ * expanded view.
+ */
+interface DebateTurn {
+	role: "advocate" | "adversary";
+	turn: number;
+	model: string;
+	text: string;
+}
+
+/** Shape of details for a `kind: "debate"` custom message. */
+interface DebateDetails {
+	kind: "debate";
+	userPrompt: string;
+	turns: DebateTurn[];
+	totalRoundTrips: number;
+	converged: boolean;
+}
+
 // Throttle interval for streaming widget updates. Lower = more responsive
 // but more terminal redraws; higher = smoother but chunkier text flow.
 const WIDGET_THROTTLE_MS = 60;
@@ -306,15 +327,86 @@ export default function (pi: ExtensionAPI) {
 	// Cache the markdown theme once — it doesn't change at runtime.
 	const markdownTheme = getMarkdownTheme();
 
-	pi.registerMessageRenderer(CUSTOM_TYPE, (message, _options, theme) => {
-		const details = (message.details ?? {}) as {
-			kind?: string;
-			turn?: number;
-			model?: string;
-		};
-		const kind = details.kind ?? "info";
-		const turn = details.turn;
+	/** Normalize message content to a plain string (handles string and array forms). */
+	const contentToString = (content: unknown): string => {
+		if (typeof content === "string") return content;
+		if (Array.isArray(content)) {
+			return content
+				.filter((c: any) => c?.type === "text")
+				.map((c: any) => c.text)
+				.join("\n");
+		}
+		return "";
+	};
 
+	pi.registerMessageRenderer(CUSTOM_TYPE, (message, options, theme) => {
+		const details = (message.details ?? {}) as Record<string, unknown>;
+		const kind = (details.kind as string) ?? "info";
+
+		const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+
+		// -----------------------------------------------------------------
+		// kind: "debate" — the batched debate result. Collapsed shows
+		// the synthesis; expanded shows the full turn-by-turn transcript.
+		// -----------------------------------------------------------------
+		if (kind === "debate") {
+			const dd = details as unknown as DebateDetails;
+			const turns = dd.turns ?? [];
+			const convergedTag = dd.converged ? "converged" : `${dd.totalRoundTrips} rounds`;
+			const body = contentToString(message.content);
+
+			if (options.expanded) {
+				// --- Expanded: show all turns then synthesis ---
+				const header = theme.fg(
+					"accent",
+					theme.bold(`[Debate] ${turns.length} turns, ${convergedTag}`),
+				);
+				box.addChild(new Text(header, 0, 0));
+
+				for (const t of turns) {
+					const roleColor = t.role === "advocate" ? "success" : "warning";
+					const roleLabel = t.role === "advocate"
+						? `[Advocate T${t.turn}]`
+						: `[Adversary T${t.turn}]`;
+					const turnHeader =
+						theme.fg(roleColor, theme.bold(roleLabel)) +
+						theme.fg("dim", ` ${t.model}`);
+					box.addChild(new Text("\n" + turnHeader, 0, 0));
+					box.addChild(
+						new Markdown(t.text, 0, 0, markdownTheme, {
+							color: (s) => theme.fg("customMessageText", s),
+						}),
+					);
+				}
+
+				// Synthesis at the end
+				box.addChild(
+					new Text("\n" + theme.fg("accent", theme.bold("[Synthesis]")), 0, 0),
+				);
+				box.addChild(
+					new Markdown(body, 0, 0, markdownTheme, {
+						color: (s) => theme.fg("customMessageText", s),
+					}),
+				);
+			} else {
+				// --- Collapsed: synthesis only with a summary header ---
+				const header = theme.fg(
+					"accent",
+					theme.bold(`[Debate] ${turns.length} turns, ${convergedTag}`),
+				) + theme.fg("dim", " (Ctrl+O to expand)");
+				box.addChild(new Text(header, 0, 0));
+				box.addChild(
+					new Markdown(body, 0, 0, markdownTheme, {
+						color: (s) => theme.fg("customMessageText", s),
+					}),
+				);
+			}
+			return box;
+		}
+
+		// -----------------------------------------------------------------
+		// Other kinds: user, system (enable/disable banners, help, status)
+		// -----------------------------------------------------------------
 		let label: string;
 		let color: Parameters<typeof theme.fg>[0];
 
@@ -323,18 +415,6 @@ export default function (pi: ExtensionAPI) {
 				label = "[You]";
 				color = "toolTitle";
 				break;
-			case "advocate":
-				label = `[Advocate T${turn ?? "?"}]`;
-				color = "success";
-				break;
-			case "adversary":
-				label = `[Adversary T${turn ?? "?"}]`;
-				color = "warning";
-				break;
-			case "synthesis":
-				label = "[Synthesis]";
-				color = "accent";
-				break;
 			case "system":
 			default:
 				label = "[Adversarial]";
@@ -342,32 +422,10 @@ export default function (pi: ExtensionAPI) {
 				break;
 		}
 
-		let header = theme.fg(color, theme.bold(label));
-		if (details.model) header += theme.fg("dim", ` ${details.model}`);
+		const header = theme.fg(color, theme.bold(label));
+		const body = contentToString(message.content);
 
-		// Normalize content to a string. Custom messages can be either a string
-		// or a content-block array; we always pass strings, but handle both for
-		// safety and to match pi's built-in CustomMessageComponent behavior.
-		let body: string;
-		if (typeof message.content === "string") {
-			body = message.content;
-		} else if (Array.isArray(message.content)) {
-			body = message.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-		} else {
-			body = "";
-		}
-
-		// Box wraps everything with the standard custom-message background
-		// (matches pi's built-in styling for non-renderer custom messages).
-		const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
-		// Header line: bold label + dim model tag, plain text.
 		box.addChild(new Text(header, 0, 0));
-		// Body: full markdown rendering via pi's built-in Markdown component.
-		// This is the same component used by user/assistant/skill messages, so
-		// headings, bold, lists, code blocks, tables, etc. all render natively.
 		box.addChild(
 			new Markdown(body, 0, 0, markdownTheme, {
 				color: (t) => theme.fg("customMessageText", t),
@@ -986,6 +1044,7 @@ async function runDebate(
 	});
 
 	const adversaryCritiques: string[] = [];
+	const recordedTurns: DebateTurn[] = [];
 	let turn = 0;
 	let convergenceSignaled = false;
 
@@ -1014,15 +1073,11 @@ async function runDebate(
 			advocateDeltaHandler.close();
 		}
 
-		pi.sendMessage({
-			customType: CUSTOM_TYPE,
-			content: advocateText,
-			display: true,
-			details: {
-				kind: "advocate",
-				turn,
-				model: `${cfg.advocate.provider}/${cfg.advocate.id}`,
-			},
+		recordedTurns.push({
+			role: "advocate",
+			turn,
+			model: `${cfg.advocate.provider}/${cfg.advocate.id}`,
+			text: advocateText,
 		});
 
 		if (isFinal) break;
@@ -1051,15 +1106,11 @@ async function runDebate(
 		}
 		adversaryCritiques.push(critiqueText);
 
-		pi.sendMessage({
-			customType: CUSTOM_TYPE,
-			content: critiqueText,
-			display: true,
-			details: {
-				kind: "adversary",
-				turn,
-				model: `${cfg.adversary.provider}/${cfg.adversary.id}`,
-			},
+		recordedTurns.push({
+			role: "adversary",
+			turn,
+			model: `${cfg.adversary.provider}/${cfg.adversary.id}`,
+			text: critiqueText,
 		});
 
 		// --- Convergence check -----------------------------------------
@@ -1079,14 +1130,24 @@ async function runDebate(
 
 	if (signal.aborted) throw new Error("debate aborted");
 
-	// Synthesis
+	// Synthesis — build and emit as a single batched debate message.
+	// The `content` field carries the synthesis (what goes into LLM context
+	// on future turns). The `details` field carries the full turn-by-turn
+	// transcript for the expanded renderer view.
 	ctx.ui.setStatus("adversarial", `⚔ T${turn}: synthesizing...`);
 	const synthesis = buildSynthesis(cfg, advocate, adversaryCritiques, turn);
+	const debateDetails: DebateDetails = {
+		kind: "debate",
+		userPrompt,
+		turns: recordedTurns,
+		totalRoundTrips: turn,
+		converged: convergenceSignaled,
+	};
 	pi.sendMessage({
 		customType: CUSTOM_TYPE,
 		content: synthesis,
 		display: true,
-		details: { kind: "synthesis" },
+		details: debateDetails,
 	});
 	// Note: footer status is reset by the caller's .finally() so it can
 	// distinguish running vs. disabled state.
