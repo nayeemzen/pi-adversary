@@ -66,52 +66,19 @@ on the bigger model.
 
 ## Demo
 
-```text
-> /adversarial on anthropic/claude-haiku-4-5 anthropic/claude-opus-4-5 min=2 max=4
-[Adversarial] Adversarial mode enabled.
+"A hot dog is a sandwich." — 5 rounds of Opus 4.6 vs itself:
 
-- Advocate:    anthropic/claude-haiku-4-5
-- Adversary:   anthropic/claude-opus-4-5
-- Min turns:   2
-- Max turns:   4
-- Convergence: auto
-- Synthesis:   merged
+![Debate turns with collapsible previews](assets/debate-collapsed.png)
 
-> Are hot dogs sandwiches? Defend with rigor.
+The advocate concedes, reframes, and the adversary pushes until
+convergence. The synthesis (always expanded) is the final answer:
 
-[You] Are hot dogs sandwiches? Defend with rigor.
+![Synthesis: the final answer after convergence](assets/debate-synthesis.png)
 
-[Advocate T1] anthropic/claude-haiku-4-5
-# Hot Dogs Are Not Sandwiches
-...
-
-[Adversary T1] anthropic/claude-opus-4-5
-## Structural Critique
-1. **User intent vs. literal question** — the user asked you to
-   "defend with rigor" but you hedged...
-2. **Hidden assumption** — you assume "sandwich" has a determinate
-   definition, which is the core disputed point...
-...
-
-[Advocate T2] anthropic/claude-haiku-4-5
-# Response to the critique
-The critique is largely right. I concede 5 of 7 points and defend
-2 with revised framing...
-...
-
-[Adversary T2] anthropic/claude-opus-4-5
-[CONVERGED]
-The advocate has acknowledged the definitional frame, committed
-to a specific camp with explicit regulatory grounding, and the
-remaining disagreement is genuinely semantic rather than factual.
-
-[Synthesis]
-# Hot Dogs Are Not Sandwiches (Revised)
-...clean final answer ready to use...
-```
-
-During each turn, a widget above the editor shows the streaming text
-tail with a live char count so you can watch the argument develop.
+During each turn, a widget above the editor streams the response
+live with a char count so you can watch the argument develop.
+Collapsed turns show a configurable preview (default 4 lines);
+press Ctrl+O to expand all.
 
 ## Install
 
