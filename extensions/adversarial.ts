@@ -331,14 +331,18 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	/** Shared renderer for all adversarial custom message types. */
-	const renderMessage = (message: any, _options: any, theme: any) => {
+	const renderMessage = (message: any, options: any, theme: any) => {
 		const ct = message.customType as string;
 		const details = (message.details ?? {}) as Record<string, unknown>;
 		const turn = details.turn as number | undefined;
 		const model = details.model as string | undefined;
+		const { expanded } = options as { expanded: boolean };
 
 		let label: string;
 		let color: Parameters<typeof theme.fg>[0];
+		// Debate turns (advocate, adversary, synthesis) are collapsible.
+		// System messages and user prompts are always expanded.
+		let collapsible = true;
 
 		switch (ct) {
 			case CT_ADVOCATE:
@@ -354,7 +358,7 @@ export default function (pi: ExtensionAPI) {
 				color = "accent";
 				break;
 			default: {
-				// CT_SYSTEM — user prompts, system banners, help
+				collapsible = false;
 				const kind = details.kind as string | undefined;
 				if (kind === "user") {
 					label = "[You]";
@@ -371,12 +375,29 @@ export default function (pi: ExtensionAPI) {
 
 		const body = contentToString(message.content);
 		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(header, 0, 0));
-		box.addChild(
-			new Markdown(body, 0, 0, markdownTheme, {
-				color: (t: string) => theme.fg("customMessageText", t),
-			}),
-		);
+
+		if (collapsible && !expanded) {
+			// --- Collapsed: header + one-line preview ---
+			const firstLine = body.split("\n").find((l) => l.trim()) ?? "";
+			const preview = firstLine.length > 100
+				? firstLine.slice(0, 100) + "…"
+				: firstLine;
+			header += theme.fg("dim", " (Ctrl+O to expand)");
+			box.addChild(new Text(header, 0, 0));
+			if (preview) {
+				box.addChild(
+					new Text(theme.fg("dim", preview), 0, 0),
+				);
+			}
+		} else {
+			// --- Expanded (or non-collapsible): full markdown ---
+			box.addChild(new Text(header, 0, 0));
+			box.addChild(
+				new Markdown(body, 0, 0, markdownTheme, {
+					color: (t: string) => theme.fg("customMessageText", t),
+				}),
+			);
+		}
 		return box;
 	};
 
