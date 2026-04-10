@@ -114,30 +114,21 @@ const DEFAULTS = {
 	adversary_thinking: "off" as ThinkingChoice,
 };
 
-const CUSTOM_TYPE = "adversarial";
+/**
+ * Custom message types — one per role, so pi's /tree shows distinct labels:
+ *   [adversarial]: system banners, user prompts
+ *   [advocate]:    advocate turns
+ *   [adversary]:   adversary turns
+ *   [synthesis]:   final answer
+ */
+const CT_SYSTEM = "adversarial";
+const CT_ADVOCATE = "advocate";
+const CT_ADVERSARY = "adversary";
+const CT_SYNTHESIS = "synthesis";
+const ALL_CUSTOM_TYPES = [CT_SYSTEM, CT_ADVOCATE, CT_ADVERSARY, CT_SYNTHESIS] as const;
+
 const STATE_ENTRY_TYPE = "adversarial-state";
 const WIDGET_KEY = "adversarial-stream";
-
-/**
- * A single recorded turn in the debate transcript. Stored in the debate
- * message's `details.turns` array and used by the renderer for the
- * expanded view.
- */
-interface DebateTurn {
-	role: "advocate" | "adversary";
-	turn: number;
-	model: string;
-	text: string;
-}
-
-/** Shape of details for a `kind: "debate"` custom message. */
-interface DebateDetails {
-	kind: "debate";
-	userPrompt: string;
-	turns: DebateTurn[];
-	totalRoundTrips: number;
-	converged: boolean;
-}
 
 // Throttle interval for streaming widget updates. Lower = more responsive
 // but more terminal redraws; higher = smoother but chunkier text flow.
@@ -203,7 +194,7 @@ export default function (pi: ExtensionAPI) {
 		activeDebate.controller.abort();
 		activeDebate = null;
 		pi.sendMessage({
-			customType: CUSTOM_TYPE,
+			customType: CT_SYSTEM,
 			content: `Debate cancelled: ${reason}`,
 			display: true,
 			details: { kind: "system" },
@@ -301,7 +292,7 @@ export default function (pi: ExtensionAPI) {
 				const reason = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Adversarial error: ${reason}`, "error");
 				pi.sendMessage({
-					customType: CUSTOM_TYPE,
+					customType: CT_SYSTEM,
 					content: `Debate failed: ${reason}`,
 					display: true,
 					details: { kind: "system" },
@@ -339,100 +330,60 @@ export default function (pi: ExtensionAPI) {
 		return "";
 	};
 
-	pi.registerMessageRenderer(CUSTOM_TYPE, (message, options, theme) => {
+	/** Shared renderer for all adversarial custom message types. */
+	const renderMessage = (message: any, _options: any, theme: any) => {
+		const ct = message.customType as string;
 		const details = (message.details ?? {}) as Record<string, unknown>;
-		const kind = (details.kind as string) ?? "info";
+		const turn = details.turn as number | undefined;
+		const model = details.model as string | undefined;
 
-		const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
-
-		// -----------------------------------------------------------------
-		// kind: "debate" — the batched debate result. Collapsed shows
-		// the synthesis; expanded shows the full turn-by-turn transcript.
-		// -----------------------------------------------------------------
-		if (kind === "debate") {
-			const dd = details as unknown as DebateDetails;
-			const turns = dd.turns ?? [];
-			const convergedTag = dd.converged ? "converged" : `${dd.totalRoundTrips} rounds`;
-			const body = contentToString(message.content);
-
-			if (options.expanded) {
-				// --- Expanded: show all turns then synthesis ---
-				const header = theme.fg(
-					"accent",
-					theme.bold(`[Debate] ${turns.length} turns, ${convergedTag}`),
-				);
-				box.addChild(new Text(header, 0, 0));
-
-				for (const t of turns) {
-					const roleColor = t.role === "advocate" ? "success" : "warning";
-					const roleLabel = t.role === "advocate"
-						? `[Advocate T${t.turn}]`
-						: `[Adversary T${t.turn}]`;
-					const turnHeader =
-						theme.fg(roleColor, theme.bold(roleLabel)) +
-						theme.fg("dim", ` ${t.model}`);
-					box.addChild(new Text("\n" + turnHeader, 0, 0));
-					box.addChild(
-						new Markdown(t.text, 0, 0, markdownTheme, {
-							color: (s) => theme.fg("customMessageText", s),
-						}),
-					);
-				}
-
-				// Synthesis at the end
-				box.addChild(
-					new Text("\n" + theme.fg("accent", theme.bold("[Synthesis]")), 0, 0),
-				);
-				box.addChild(
-					new Markdown(body, 0, 0, markdownTheme, {
-						color: (s) => theme.fg("customMessageText", s),
-					}),
-				);
-			} else {
-				// --- Collapsed: synthesis only with a summary header ---
-				const header = theme.fg(
-					"accent",
-					theme.bold(`[Debate] ${turns.length} turns, ${convergedTag}`),
-				) + theme.fg("dim", " (Ctrl+O to expand)");
-				box.addChild(new Text(header, 0, 0));
-				box.addChild(
-					new Markdown(body, 0, 0, markdownTheme, {
-						color: (s) => theme.fg("customMessageText", s),
-					}),
-				);
-			}
-			return box;
-		}
-
-		// -----------------------------------------------------------------
-		// Other kinds: user, system (enable/disable banners, help, status)
-		// -----------------------------------------------------------------
 		let label: string;
 		let color: Parameters<typeof theme.fg>[0];
 
-		switch (kind) {
-			case "user":
-				label = "[You]";
-				color = "toolTitle";
+		switch (ct) {
+			case CT_ADVOCATE:
+				label = `[Advocate T${turn ?? "?"}]`;
+				color = "success";
 				break;
-			case "system":
-			default:
-				label = "[Adversarial]";
-				color = "muted";
+			case CT_ADVERSARY:
+				label = `[Adversary T${turn ?? "?"}]`;
+				color = "warning";
 				break;
+			case CT_SYNTHESIS:
+				label = "[Synthesis]";
+				color = "accent";
+				break;
+			default: {
+				// CT_SYSTEM — user prompts, system banners, help
+				const kind = details.kind as string | undefined;
+				if (kind === "user") {
+					label = "[You]";
+					color = "toolTitle";
+				} else {
+					label = "[Adversarial]";
+					color = "muted";
+				}
+			}
 		}
 
-		const header = theme.fg(color, theme.bold(label));
-		const body = contentToString(message.content);
+		let header = theme.fg(color, theme.bold(label));
+		if (model) header += theme.fg("dim", ` ${model}`);
 
+		const body = contentToString(message.content);
+		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(header, 0, 0));
 		box.addChild(
 			new Markdown(body, 0, 0, markdownTheme, {
-				color: (t) => theme.fg("customMessageText", t),
+				color: (t: string) => theme.fg("customMessageText", t),
 			}),
 		);
 		return box;
-	});
+	};
+
+	// Register the same renderer for all our custom types.
+	for (const ct of ALL_CUSTOM_TYPES) {
+		pi.registerMessageRenderer(ct, renderMessage);
+	}
 
 	// -----------------------------------------------------------------------
 	// /adversarial command
@@ -465,7 +416,7 @@ export default function (pi: ExtensionAPI) {
 				persistState();
 				ctx.ui.setStatus("adversarial", undefined);
 				pi.sendMessage({
-					customType: CUSTOM_TYPE,
+					customType: CT_SYSTEM,
 					content: "Adversarial mode disabled. Back to normal chat.",
 					display: true,
 					details: { kind: "system" },
@@ -479,7 +430,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				pi.sendMessage({
-					customType: CUSTOM_TYPE,
+					customType: CT_SYSTEM,
 					content: formatConfigSummary(config),
 					display: true,
 					details: { kind: "system" },
@@ -489,7 +440,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "help" || sub === "?") {
 				pi.sendMessage({
-					customType: CUSTOM_TYPE,
+					customType: CT_SYSTEM,
 					content: HELP_TEXT,
 					display: true,
 					details: { kind: "system" },
@@ -537,7 +488,7 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			pi.sendMessage({
-				customType: CUSTOM_TYPE,
+				customType: CT_SYSTEM,
 				content:
 					"**Adversarial mode enabled.**\n\n" +
 					formatConfigSummary(newConfig) +
@@ -1037,14 +988,13 @@ async function runDebate(
 	// not an orchestrator-session user message — the orchestrator session stays
 	// out of the debate entirely).
 	pi.sendMessage({
-		customType: CUSTOM_TYPE,
+		customType: CT_SYSTEM,
 		content: userPrompt,
 		display: true,
 		details: { kind: "user" },
 	});
 
 	const adversaryCritiques: string[] = [];
-	const recordedTurns: DebateTurn[] = [];
 	let turn = 0;
 	let convergenceSignaled = false;
 
@@ -1073,11 +1023,11 @@ async function runDebate(
 			advocateDeltaHandler.close();
 		}
 
-		recordedTurns.push({
-			role: "advocate",
-			turn,
-			model: `${cfg.advocate.provider}/${cfg.advocate.id}`,
-			text: advocateText,
+		pi.sendMessage({
+			customType: CT_ADVOCATE,
+			content: advocateText,
+			display: true,
+			details: { turn, model: `${cfg.advocate.provider}/${cfg.advocate.id}` },
 		});
 
 		if (isFinal) break;
@@ -1106,11 +1056,11 @@ async function runDebate(
 		}
 		adversaryCritiques.push(critiqueText);
 
-		recordedTurns.push({
-			role: "adversary",
-			turn,
-			model: `${cfg.adversary.provider}/${cfg.adversary.id}`,
-			text: critiqueText,
+		pi.sendMessage({
+			customType: CT_ADVERSARY,
+			content: critiqueText,
+			display: true,
+			details: { turn, model: `${cfg.adversary.provider}/${cfg.adversary.id}` },
 		});
 
 		// --- Convergence check -----------------------------------------
@@ -1130,24 +1080,14 @@ async function runDebate(
 
 	if (signal.aborted) throw new Error("debate aborted");
 
-	// Synthesis — build and emit as a single batched debate message.
-	// The `content` field carries the synthesis (what goes into LLM context
-	// on future turns). The `details` field carries the full turn-by-turn
-	// transcript for the expanded renderer view.
+	// Synthesis
 	ctx.ui.setStatus("adversarial", `⚔ T${turn}: synthesizing...`);
 	const synthesis = buildSynthesis(cfg, advocate, adversaryCritiques, turn);
-	const debateDetails: DebateDetails = {
-		kind: "debate",
-		userPrompt,
-		turns: recordedTurns,
-		totalRoundTrips: turn,
-		converged: convergenceSignaled,
-	};
 	pi.sendMessage({
-		customType: CUSTOM_TYPE,
+		customType: CT_SYNTHESIS,
 		content: synthesis,
 		display: true,
-		details: debateDetails,
+		details: { totalTurns: turn, converged: convergenceSignaled },
 	});
 	// Note: footer status is reset by the caller's .finally() so it can
 	// distinguish running vs. disabled state.
