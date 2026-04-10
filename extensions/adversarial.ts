@@ -354,6 +354,8 @@ export default function (pi: ExtensionAPI) {
 				color = "warning";
 				break;
 			case CT_SYNTHESIS:
+				// Synthesis is always expanded — it's the final answer.
+				collapsible = false;
 				label = "[Synthesis]";
 				color = "accent";
 				break;
