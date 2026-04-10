@@ -26,7 +26,7 @@ import type {
 } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
-import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { convertToLlm, getMarkdownTheme, serializeConversation } from "@mariozechner/pi-coding-agent";
 import { Box, Markdown, Text } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
@@ -123,6 +123,9 @@ const WIDGET_KEY = "adversarial-stream";
 const WIDGET_THROTTLE_MS = 60;
 // Tail size for the streaming preview widget (lines of recent output).
 const WIDGET_TAIL_LINES = 12;
+// Maximum chars of prior session context to inject into the first role prompt.
+// ~50K chars ≈ ~12K tokens, leaving plenty of headroom for the debate itself.
+const MAX_SESSION_CONTEXT_CHARS = 50_000;
 
 // ---------------------------------------------------------------------------
 // Role prompts (from the spec)
@@ -952,6 +955,11 @@ async function runDebate(
 	const adversaryAuth = await ctx.modelRegistry.getApiKeyAndHeaders(adversaryModel);
 	if (!adversaryAuth.ok) throw new Error(`Adversary auth failed: ${adversaryAuth.error}`);
 
+	// Collect the prior session conversation BEFORE we add any debate messages.
+	// This gives both roles the context they need to treat the user's prompt as
+	// a follow-up rather than a standalone question.
+	const sessionContext = collectSessionContext(ctx);
+
 	const advocate = new Debater(
 		"advocate",
 		advocateModel,
@@ -997,7 +1005,7 @@ async function runDebate(
 
 		const advocateInput =
 			advocate.turnsCompleted === 0
-				? buildAdvocateInitialInput(userPrompt, isFinal)
+				? buildAdvocateInitialInput(userPrompt, isFinal, sessionContext)
 				: buildAdvocateReviseInput(adversary.lastText, isFinal);
 		let advocateText: string;
 		try {
@@ -1033,6 +1041,7 @@ async function runDebate(
 			advocateText,
 			adversary.turnsCompleted === 0,
 			canConverge,
+			sessionContext,
 		);
 		let critiqueText: string;
 		try {
@@ -1154,8 +1163,15 @@ function formatChars(n: number): string {
 // will be pushed into one debater's isolated context.
 // ---------------------------------------------------------------------------
 
-function buildAdvocateInitialInput(userPrompt: string, isFinal: boolean): string {
-	return `User's request:\n\n${userPrompt}${finalInstructions(isFinal)}`;
+function buildAdvocateInitialInput(
+	userPrompt: string,
+	isFinal: boolean,
+	sessionContext: string,
+): string {
+	const contextBlock = sessionContext
+		? `Prior conversation context (the user's request below is a follow-up to this):\n\n<context>\n${sessionContext}\n</context>\n\n`
+		: "";
+	return `${contextBlock}User's request:\n\n${userPrompt}${finalInstructions(isFinal)}`;
 }
 
 function buildAdvocateReviseInput(latestCritique: string, isFinal: boolean): string {
@@ -1179,9 +1195,13 @@ function buildAdversaryInput(
 	advocateText: string,
 	isFirstCritique: boolean,
 	canConverge: boolean,
+	sessionContext: string,
 ): string {
+	const contextBlock = isFirstCritique && sessionContext
+		? `Prior conversation context:\n\n<context>\n${sessionContext}\n</context>\n\n`
+		: "";
 	const framing = isFirstCritique
-		? `Original user request:\n\n${userPrompt}\n\nAdvocate's answer:\n\n${advocateText}\n\nCritique this answer using your full priority list.`
+		? `${contextBlock}Original user request:\n\n${userPrompt}\n\nAdvocate's answer:\n\n${advocateText}\n\nCritique this answer using your full priority list.`
 		: `Original user request:\n\n${userPrompt}\n\nAdvocate's latest revised answer:\n\n${advocateText}\n\nCritique this revision. Do not relitigate points you've already conceded.`;
 
 	const convergenceRule = canConverge
@@ -1236,4 +1256,52 @@ function extractText(message: AssistantMessage): string {
 		.map((part) => part.text)
 		.join("\n")
 		.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Session context collection — gives the debate roles awareness of the prior
+// conversation so follow-up prompts ("corn starch or baking soda?") are
+// understood in context ("...for the french fries recipe we just discussed").
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk the current session branch and serialize the prior conversation
+ * (user/assistant/tool/custom messages) into a text block. This is injected
+ * into the first advocate and adversary prompts so both roles can treat
+ * the user’s message as a continuation rather than a standalone question.
+ *
+ * Uses pi’s built-in `convertToLlm` + `serializeConversation` — the same
+ * pipeline used by compaction and the handoff extension.
+ *
+ * Returns an empty string if there’s no prior context worth including.
+ */
+function collectSessionContext(ctx: ExtensionContext): string {
+	const branch = ctx.sessionManager.getBranch();
+
+	// Extract only message entries (user, assistant, toolResult, custom messages).
+	const messages = branch
+		.filter(
+			(entry): entry is SessionEntry & { type: "message" } =>
+				entry.type === "message",
+		)
+		.map((entry) => (entry as any).message);
+
+	if (messages.length === 0) return "";
+
+	// Convert pi’s internal message types (custom messages, bash executions,
+	// etc.) to standard LLM messages, then serialize to a readable transcript.
+	const llmMessages = convertToLlm(messages);
+	if (llmMessages.length === 0) return "";
+
+	let serialized = serializeConversation(llmMessages);
+
+	// Cap to avoid blowing out the role’s context window on long sessions.
+	if (serialized.length > MAX_SESSION_CONTEXT_CHARS) {
+		const truncated = serialized.length - MAX_SESSION_CONTEXT_CHARS;
+		serialized =
+			`[... ${truncated} earlier characters truncated]\n\n` +
+			serialized.slice(-MAX_SESSION_CONTEXT_CHARS);
+	}
+
+	return serialized;
 }
