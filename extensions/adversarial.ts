@@ -70,6 +70,8 @@ interface AdversarialConfig {
 	max_turns: number;
 	convergence_mode: ConvergenceMode;
 	synthesis_style: SynthesisStyle;
+	/** Number of content lines shown in collapsed view (0 = header only). */
+	preview_lines: number;
 }
 
 /**
@@ -102,6 +104,7 @@ function normalizeRestoredConfig(
 		max_turns: raw.max_turns ?? DEFAULTS.max_turns,
 		convergence_mode: raw.convergence_mode ?? DEFAULTS.convergence_mode,
 		synthesis_style: raw.synthesis_style ?? DEFAULTS.synthesis_style,
+		preview_lines: raw.preview_lines ?? DEFAULTS.preview_lines,
 	};
 }
 
@@ -112,6 +115,7 @@ const DEFAULTS = {
 	synthesis_style: "merged" as SynthesisStyle,
 	advocate_thinking: "off" as ThinkingChoice,
 	adversary_thinking: "off" as ThinkingChoice,
+	preview_lines: 4,
 };
 
 /**
@@ -379,16 +383,20 @@ export default function (pi: ExtensionAPI) {
 		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
 
 		if (collapsible && !expanded) {
-			// --- Collapsed: header + one-line preview ---
-			const firstLine = body.split("\n").find((l) => l.trim()) ?? "";
-			const preview = firstLine.length > 100
-				? firstLine.slice(0, 100) + "…"
-				: firstLine;
+			// --- Collapsed: header + N-line preview ---
+			const maxLines = config?.preview_lines ?? DEFAULTS.preview_lines;
+			const allLines = body.split("\n");
+			const previewLines = allLines.slice(0, maxLines);
+			const truncated = allLines.length > maxLines;
+			const previewText = previewLines.join("\n") +
+				(truncated ? `\n… (${allLines.length - maxLines} more lines)` : "");
 			header += theme.fg("dim", " (Ctrl+O to expand)");
 			box.addChild(new Text(header, 0, 0));
-			if (preview) {
+			if (previewText.trim()) {
 				box.addChild(
-					new Text(theme.fg("dim", preview), 0, 0),
+					new Markdown(previewText, 0, 0, markdownTheme, {
+						color: (t: string) => theme.fg("dim", t),
+					}),
 				);
 			}
 		} else {
@@ -584,6 +592,7 @@ function formatConfigSummary(cfg: AdversarialConfig): string {
 		`- **Max turns:** ${cfg.max_turns}`,
 		`- **Convergence:** \`${cfg.convergence_mode}\``,
 		`- **Synthesis:** \`${cfg.synthesis_style}\``,
+		`- **Preview lines:** ${cfg.preview_lines}`,
 	].join("\n");
 }
 
@@ -632,6 +641,7 @@ function parseInlineConfig(tokens: string[], ctx: ExtensionContext): Adversarial
 	let synthesis_style: SynthesisStyle = DEFAULTS.synthesis_style;
 	let advocate_thinking: ThinkingChoice = DEFAULTS.advocate_thinking;
 	let adversary_thinking: ThinkingChoice = DEFAULTS.adversary_thinking;
+	let preview_lines = DEFAULTS.preview_lines;
 
 	for (const token of tokens.slice(2)) {
 		const eq = token.indexOf("=");
@@ -682,6 +692,10 @@ function parseInlineConfig(tokens: string[], ctx: ExtensionContext): Adversarial
 				}
 				adversary_thinking = value;
 				break;
+			case "preview_lines":
+			case "preview":
+				preview_lines = clampInt(value, DEFAULTS.preview_lines, 0, 50);
+				break;
 			default:
 				throw new Error(`Unknown parameter '${key}'`);
 		}
@@ -703,6 +717,7 @@ function parseInlineConfig(tokens: string[], ctx: ExtensionContext): Adversarial
 		max_turns: Math.max(max_turns, min_turns),
 		convergence_mode,
 		synthesis_style,
+		preview_lines,
 	};
 }
 
@@ -776,6 +791,12 @@ async function runSetupFlow(ctx: ExtensionContext): Promise<AdversarialConfig | 
 	])) as SynthesisStyle | undefined;
 	if (!synthesisPick) return null;
 
+	const previewInput = await ctx.ui.input(
+		`preview_lines — collapsed preview size (default ${DEFAULTS.preview_lines}, 0=header only):`,
+		String(DEFAULTS.preview_lines),
+	);
+	if (previewInput === undefined) return null;
+
 	const min_turns = clampInt(minInput, DEFAULTS.min_turns, 1, 50);
 	const max_turns = clampInt(maxInput, DEFAULTS.max_turns, Math.max(min_turns, 1), 50);
 
@@ -788,6 +809,7 @@ async function runSetupFlow(ctx: ExtensionContext): Promise<AdversarialConfig | 
 		max_turns: Math.max(max_turns, min_turns),
 		convergence_mode: convergencePick,
 		synthesis_style: synthesisPick,
+		preview_lines: clampInt(previewInput, DEFAULTS.preview_lines, 0, 50),
 	};
 }
 
